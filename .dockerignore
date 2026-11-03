@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!mp4_to_model.py
+!openmvs-opencv46.patch

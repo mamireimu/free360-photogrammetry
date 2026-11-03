@@ -1,0 +1,14 @@
+diff --git a/libs/Common/Types.inl b/libs/Common/Types.inl
+--- a/libs/Common/Types.inl
++++ b/libs/Common/Types.inl
+@@ -3107,8 +3107,8 @@
+ 		compression_params.push_back(95);
+ 	} else
+ 	if (ext == ".jxl") {
+-		compression_params.push_back(cv::IMWRITE_JPEGXL_QUALITY);
+-		compression_params.push_back(95);
++		VERBOSE("error: JPEG XL export via OpenCV is disabled in this build");
++		return false;
+ 	} else
+ 	if (ext == ".pfm") {
+ 		if (img.depth() != CV_32F)

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.zip
+# Job outputs (frames, depth maps, meshes) are large; keep them outside the repository.
+output/
+result*/
