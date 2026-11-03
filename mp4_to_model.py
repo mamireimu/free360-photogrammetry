@@ -147,8 +147,8 @@ def restart_after_matches(root, state, config, version):
 
 # Settings used only from a late stage on, with the first stage each affects. Changing one on
 # --resume redoes that stage and everything after it instead of refusing the job.
-RESTAGE = {'target_faces': '09_', 'free_space_support': '09_', 'close_holes': '09_', 'floor': '09b_',
-           'texture_size': '10_'}
+RESTAGE = {'target_faces': '09_', 'free_space_support': '09_', 'close_holes': '09_', 'smooth': '09_',
+           'floor': '09b_', 'texture_size': '10_', 'virtual_face_images': '10_'}
 
 
 def restage(state, config):
@@ -272,6 +272,11 @@ def probe(video):
     return {'width': width, 'height': height, 'duration': duration,
             'codec': data['streams'][0].get('codec_name', ''),
             'pix_fmt': data['streams'][0].get('pix_fmt', '')}
+
+
+def native_face_size(width, fov=100):
+    """Face edge in pixels matching the panorama's own resolution, rounded to a multiple of 16."""
+    return max(16, round(width * fov / 360 / 16) * 16)
 
 
 def texture_outputs(root):
@@ -668,7 +673,8 @@ def reconstruct(j, a, video, info):
     # free-space support keeps such weakly-supported surfaces, and close-holes patches the rest.
     j.command('09_mesh_v2', ['ReconstructMesh', '-i', root / 'scene.mvs', '-p', root / 'scene.ply',
         '-o', root / 'mesh.mvs', '--archive-type', 2, '--target-face-num', a.target_faces,
-        '--free-space-support', int(a.free_space_support), '--close-holes', a.close_holes, '--max-threads', a.threads],
+        '--free-space-support', int(a.free_space_support), '--close-holes', a.close_holes, '--smooth', a.smooth,
+        '--max-threads', a.threads],
         [root / 'mesh.mvs', root / 'mesh.ply'])
     mesh = root / 'mesh.ply'
     if a.floor:
@@ -681,10 +687,12 @@ def reconstruct(j, a, video, info):
     # over a 20px border strip) fail on these scenes; release builds skip their asserts, so NaN/huge
     # colors are written as black or saturated texels. Seam leveling is cosmetic, so disable both.
     # The stage name changed so --resume redoes texturing for jobs finished with the old settings
-    # (v5: textures the floor-flattened mesh).
+    # (v5: textures the floor-flattened mesh). Without seam leveling every triangle shows its own
+    # frame's exposure; virtual faces texture coplanar triangles that share views as one patch.
     j.command('10_texture_v5', ['TextureMesh', '-i', root / 'mesh.mvs', '-m', mesh,
         '-o', root / 'model.mvs', '--export-type', 'obj', '--max-texture-size', a.texture_size,
         '--global-seam-leveling', 0, '--local-seam-leveling', 0,
+        '--virtual-face-images', a.virtual_face_images,
         '--max-threads', a.threads], lambda: texture_outputs(root)[0])
     # Runs on every invocation so --resume also repairs models textured by older versions.
     opaque_materials(root)
@@ -708,7 +716,8 @@ def parse_args(argv=None):
     parser.add_argument('--fps', type=float, default=1)
     parser.add_argument('--start', type=float, default=0)
     parser.add_argument('--duration', type=float)
-    parser.add_argument('--face-size', type=int, default=1536)
+    parser.add_argument('--face-size', type=int,
+                        help="Face edge in pixels; by default the panorama's own resolution (1072 for 3840-wide video)")
     parser.add_argument('--faces', type=int, choices=(4, 6), default=6)
     parser.add_argument('--gpus', default='all', help='All NVIDIA GPUs by default; or CUDA indices such as 0,1,2,3')
     parser.add_argument('--decode', choices=('auto', 'cuda', 'cpu'), default='auto',
@@ -719,11 +728,15 @@ def parse_args(argv=None):
     parser.add_argument('--loop-images', type=int, default=20,
                         help='Similar images matched per image anywhere in the video (0 disables loop matching)')
     parser.add_argument('--target-faces', type=int, default=500000)
-    parser.add_argument('--texture-size', type=int, default=4096)
+    parser.add_argument('--texture-size', type=int, default=8192)
     parser.add_argument('--free-space-support', action=argparse.BooleanOptionalAction, default=True,
                         help='Keep weakly-supported surfaces such as white walls when meshing (--no-free-space-support disables)')
     parser.add_argument('--close-holes', type=int, default=300,
                         help='Close mesh holes up to this many boundary edges (0 disables; OpenMVS default 30)')
+    parser.add_argument('--smooth', type=int, default=8,
+                        help='Mesh smoothing iterations against depth noise (0 disables; OpenMVS default 2)')
+    parser.add_argument('--virtual-face-images', type=int, default=3,
+                        help='Texture coplanar triangles sharing at least this many views as one patch (0 disables)')
     parser.add_argument('--floor', action=argparse.BooleanOptionalAction, default=True,
                         help='Snap mesh vertices that sank below the walked floor back onto it (--no-floor disables)')
     parser.add_argument('--min-registered-ratio', type=float, default=.3)
@@ -731,7 +744,7 @@ def parse_args(argv=None):
                         help='Camera pose solver: global (all frames at once) or incremental (COLMAP mapper)')
     a = parser.parse_args(argv)
     for key in ('fps', 'face_size', 'threads', 'overlap', 'max_frames', 'target_faces', 'texture_size'):
-        if not math.isfinite(getattr(a, key)) or getattr(a, key) <= 0:
+        if getattr(a, key) is not None and (not math.isfinite(getattr(a, key)) or getattr(a, key) <= 0):
             parser.error(f'--{key.replace("_", "-")} must be positive and finite')
     if not math.isfinite(a.start) or a.start < 0:
         parser.error('--start must be nonnegative and finite')
@@ -739,8 +752,9 @@ def parse_args(argv=None):
         parser.error('--duration must be positive and finite')
     if a.loop_images < 0:
         parser.error('--loop-images must be nonnegative')
-    if a.close_holes < 0:
-        parser.error('--close-holes must be nonnegative')
+    for key in ('close_holes', 'smooth', 'virtual_face_images'):
+        if getattr(a, key) < 0:
+            parser.error(f'--{key.replace("_", "-")} must be nonnegative')
     if not 0 < a.min_registered_ratio <= 1:
         parser.error('--min-registered-ratio must be in (0,1]')
     if a.gpus != 'all' and not re.fullmatch(r'\d+(,\d+)*', a.gpus):
@@ -755,6 +769,10 @@ def main(argv=None):
         raise RuntimeError('Input must be a video file outside the output directory.')
     a.gpus = ','.join(str(x) for x in preflight(a.gpus))
     info = probe(video)
+    if a.face_size is None:
+        # Larger faces only upsample the panorama: depth and disk cost grow with no extra detail.
+        a.face_size = native_face_size(info['width'])
+        print(f'Face size {a.face_size}px matches the {info["width"]}px-wide panorama.', flush=True)
     if a.start >= info['duration']:
         raise RuntimeError('--start is beyond the end of the video.')
     seconds = min(a.duration or info['duration'], info['duration'] - a.start)

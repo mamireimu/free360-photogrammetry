@@ -94,9 +94,15 @@ class Tests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.a = m.parse_args(['video.mp4', '-o', str(self.root), '--gpus', '0,1,2,3'])
-        self.config = {'video': 'hash', 'gpus': self.a.gpus}
         self.info = {'width': 5760, 'height': 2880, 'duration': 10, 'codec': 'hevc', 'pix_fmt': 'yuv420p'}
+        self.a = self.args()
+        self.config = {'video': 'hash', 'gpus': self.a.gpus}
+
+    def args(self, *extra):
+        """Parsed arguments with the face size main() derives from the video."""
+        a = m.parse_args(['video.mp4', '-o', str(self.root), '--gpus', '0,1,2,3', *extra])
+        a.face_size = a.face_size or m.native_face_size(self.info['width'])
+        return a
 
     def job(self, resume=False, fail=None, registered=40):
         j = FakeJob(self.root, self.config, resume)
@@ -330,7 +336,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(rig[0]['cameras']), 6)
 
     def test_incremental_mapper_option(self):
-        self.a = m.parse_args(['video.mp4', '-o', str(self.root), '--gpus', '0,1,2,3', '--sfm', 'incremental'])
+        self.a = self.args('--sfm', 'incremental')
         j = self.job()
         self.reconstruct(j)
         mapper = next(cmd for name, cmd in j.calls if name == '04_sparse')
@@ -383,7 +389,7 @@ class Tests(unittest.TestCase):
         self.assertLess(names.index('03_loops'), names.index('04_sparse'))
 
     def test_loop_matching_can_be_disabled(self):
-        self.a = m.parse_args(['video.mp4', '-o', str(self.root), '--gpus', '0,1,2,3', '--loop-images', '0'])
+        self.a = self.args('--loop-images', '0')
         j = self.job()
         self.reconstruct(j)
         self.assertNotIn('03_loops', [n for n, _ in j.calls])
@@ -484,6 +490,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(j.calls[0][0], '01_frames_cpu')
         self.assertIn('not configured', json.loads((self.root / 'decode.json').read_text())['fallback_reason'])
 
+    def test_face_size_defaults_to_panorama_resolution(self):
+        self.assertIsNone(m.parse_args(['v.mp4', '-o', 'out']).face_size)
+        self.assertEqual(m.parse_args(['v.mp4', '-o', 'out', '--face-size', '1024']).face_size, 1024)
+        for width, size in ((3840, 1072), (5760, 1600), (7680, 2128)):
+            self.assertEqual(m.native_face_size(width), size)
+
     def test_default_gpu_selection_is_all(self):
         a = m.parse_args(['v.mp4', '-o', 'out'])
         self.assertEqual(a.gpus, 'all')
@@ -529,6 +541,8 @@ class Tests(unittest.TestCase):
         self.reconstruct(self.job())
         cases = (({'target_faces': 3000000}, ['09_mesh_v2', '10_texture_v5'], True),
                  ({'texture_size': 8192}, ['10_texture_v5'], False),
+                 ({'smooth': 2}, ['09_mesh_v2', '10_texture_v5'], True),
+                 ({'virtual_face_images': 0}, ['10_texture_v5'], False),
                  ({'floor': False}, ['10_texture_v5'], False))
         for change, calls, floor_redone in cases:
             with self.subTest(change=change):
@@ -547,6 +561,10 @@ class Tests(unittest.TestCase):
         mesh = next(cmd for name, cmd in j.calls if name == '09_mesh_v2')
         self.assertEqual(mesh[mesh.index('--free-space-support') + 1], 1)
         self.assertEqual(mesh[mesh.index('--close-holes') + 1], 300)
+        self.assertEqual(mesh[mesh.index('--smooth') + 1], 8)
+        texture = next(cmd for name, cmd in j.calls if name == '10_texture_v5')
+        self.assertEqual(texture[texture.index('--virtual-face-images') + 1], 3)
+        self.assertEqual(texture[texture.index('--max-texture-size') + 1], 8192)
         a = m.parse_args(['v.mp4', '-o', 'out', '--no-free-space-support', '--close-holes', '0'])
         self.assertEqual((a.free_space_support, a.close_holes), (False, 0))
 
@@ -572,7 +590,8 @@ class Tests(unittest.TestCase):
 
     def test_invalid_parameters(self):
         for extra in (['--fps', 'nan'], ['--duration', '0'], ['--gpus', '0;rm'], ['--start', '-1'],
-                      ['--loop-images', '-1'], ['--close-holes', '-1']):
+                      ['--loop-images', '-1'], ['--close-holes', '-1'],
+                      ['--smooth', '-1'], ['--virtual-face-images', '-1'], ['--face-size', '0']):
             with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     m.parse_args(['v.mp4', '-o', 'out', *extra])

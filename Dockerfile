@@ -2,6 +2,8 @@
 FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG BUILD_JOBS=4
+# 75 = Tesla T4, 89 = RTX 40 series (e.g. 4090). Add others with --build-arg CUDA_ARCHITECTURES=...
+ARG CUDA_ARCHITECTURES="75;89"
 ARG COLMAP_REF=4.2.1
 ARG OPENMVS_REF=v2.4.0
 ARG VCG_REF=658ba36d0a5666650da6e066b4794efc5a463407
@@ -23,10 +25,10 @@ RUN git clone --depth 1 --branch v6.0.1 https://github.com/CGAL/cgal.git /opt/cg
        -DCMAKE_INSTALL_PREFIX=/opt/cgal \
     && cmake --build /opt/cgal-build --parallel ${BUILD_JOBS} \
     && cmake --install /opt/cgal-build
-# Explicit sm_75 supports Tesla T4. Image build does not need a GPU.
+# Explicit CUDA architectures; image build does not need a GPU.
 RUN git clone --depth 1 --branch ${COLMAP_REF} https://github.com/colmap/colmap.git /opt/colmap-src \
     && cmake -S /opt/colmap-src -B /opt/colmap-build -GNinja \
-       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=75 \
+       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
        -DCUDA_ENABLED=ON -DGUI_ENABLED=OFF -DOPENGL_ENABLED=OFF -DONNX_ENABLED=OFF \
        -DBLA_VENDOR=OpenBLAS -DCMAKE_PREFIX_PATH=/opt/cgal \
     && cmake --build /opt/colmap-build --parallel ${BUILD_JOBS} \
@@ -70,7 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && cmake -S /opt/ceres-cuda-src -B /opt/ceres-cuda-build -GNinja \
        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/ceres-cuda \
        -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-       -DCMAKE_CUDA_ARCHITECTURES=75 -DWITH_CUDA=default -DWITH_SUITESPARSE=ON -Dcudss_DIR="${cudss_dir}" \
+       -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" -DWITH_CUDA=default -DWITH_SUITESPARSE=ON -Dcudss_DIR="${cudss_dir}" \
        -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
     && cmake --build /opt/ceres-cuda-build --parallel ${BUILD_JOBS} \
     && cmake --install /opt/ceres-cuda-build \
@@ -80,7 +82,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ! grep -q '^#define CERES_NO_SUITESPARSE$' /opt/ceres-cuda/include/ceres/internal/config.h
 RUN cudss_dir="$(dirname "$(find /usr -name cudss-config.cmake | head -1)")" \
     && cmake -S /opt/colmap-src -B /opt/colmap-build -GNinja -Dcudss_DIR="${cudss_dir}" \
-       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=75 \
+       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
        -DCUDA_ENABLED=ON -DGUI_ENABLED=OFF -DOPENGL_ENABLED=OFF -DONNX_ENABLED=OFF \
        -DBLA_VENDOR=OpenBLAS -DCeres_DIR=/opt/ceres-cuda/lib/cmake/Ceres \
        -DCMAKE_PREFIX_PATH="/opt/ceres-cuda;/opt/cgal" \

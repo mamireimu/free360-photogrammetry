@@ -27,7 +27,7 @@
 ## 必要なもの
 
 - Linuxホスト（Debianで確認）、Docker、NVIDIAドライバー、NVIDIA Container Toolkit
-- NVIDIA GPU（Tesla T4×4で確認。ビルドは `sm_75` 向け）
+- NVIDIA GPU（Tesla T4×4で確認。ビルドは既定で `sm_75`（T4）と `sm_89`（RTX 40シリーズ）向け）
 - 十分なRAMとディスク。12分・3fps・1,024pxの動画（約13,000枚）で、メモリ約75GB、ディスク約405GBを使いました（[参考指標](#参考指標処理時間メモリディスク)）
 - 入力：スティッチ済みの正距円筒図法（equirectangular）、横縦比2:1の360度MP4
 
@@ -41,7 +41,13 @@ cd free360-photogrammetry
 docker build --progress=plain -t free360-photogrammetry:1 .
 ~~~
 
-COLMAP・Ceres・OpenMVSをソースからビルドするため、初回は時間がかかります。`BUILD_JOBS`（既定4）で並列数を変えられます。
+COLMAP・Ceres・OpenMVSをソースからビルドするため、初回は時間がかかります。`BUILD_JOBS`（既定4）で並列数を変えられます。並列数を上げるとメモリも多く使います。
+別の世代のGPUを使う場合は、`CUDA_ARCHITECTURES` で対象を指定します（例：RTX 30シリーズなら `86`）。
+
+~~~bash
+docker build --build-arg BUILD_JOBS=16 --build-arg CUDA_ARCHITECTURES=89 -t free360-photogrammetry:1 .
+~~~
+
 旧名 `mp4-to-model:1` でビルドしたことがあれば、同じDockerビルダーのキャッシュが使われます。
 
 ### 実行
@@ -49,7 +55,7 @@ COLMAP・Ceres・OpenMVSをソースからビルドするため、初回は時�
 入力・出力のパスを実際のものに置き換えてください。
 
 ~~~bash
-bash run.sh /data/room360.mp4 /data/result --fps 3 --face-size 1024
+bash run.sh /data/room360.mp4 /data/result --fps 3
 ~~~
 
 - GPUを省略すると、見えている全NVIDIA GPUを使います（`--gpus 0,1,2,3` のようにも指定できます）。
@@ -99,7 +105,7 @@ bash run.sh /data/room360.mp4 /data/result --fps 3 --face-size 1024
 | --start | 0 | 開始位置（秒） |
 | --duration | 動画末尾まで | 処理する秒数 |
 | --fps | 1 | 1秒あたりの時間サンプル数。屋内の歩き撮りでは3が目安 |
-| --face-size | 1536 | 各方向画像の一辺（px）。大きいほど深度推定の時間とディスクが増える |
+| --face-size | 自動 | 各方向画像の一辺（px）。既定では元動画の解像度に合わせる（横幅3840なら1072、5760なら1600）。これより大きくしても引き伸ばしになるだけで、深度推定の時間とディスクが増える |
 | --faces | 6 | 4なら水平のみ、6なら上下を含む |
 | --gpus | all | 全GPU、または `0,1,2,3` のような指定 |
 | --decode | auto | auto／cuda／cpu。autoはNVDECを試し、失敗したら理由を表示してCPUで再試行 |
@@ -110,9 +116,11 @@ bash run.sh /data/room360.mp4 /data/result --fps 3 --face-size 1024
 | --sfm | global | カメラ位置推定の方式。incrementalは従来のCOLMAP mapper |
 | --min-registered-ratio | 0.3 | 最大の復元成分に登録された画像の最低割合。下回ると高密度化へ進まない |
 | --target-faces | 500000 | 目標面数。範囲全体に配るので、広い場所では増やす（例 3000000） |
-| --texture-size | 4096 | テクスチャ1枚の最大サイズ |
+| --texture-size | 8192 | テクスチャ1枚の最大サイズ。Unityでは取り込み設定の Max Size も合わせる |
+| --virtual-face-images | 3 | 同じ平面で、この枚数以上の写真に共通して写る三角形をまとめて1枚の写真から貼る。色のまだらが減る（0で無効） |
 | --free-space-support／--no-free-space-support | 有効 | メッシュ化で、点の少ない面（白い壁など）を視線の情報から残す |
 | --close-holes | 300 | この辺数までの穴を面でふさぐ（OpenMVSの既定は30、0で無効） |
+| --smooth | 8 | メッシュの平滑化の回数。深度の誤差による凹凸をならす。大きいほど角も丸くなる（OpenMVSの既定は2、0で無効） |
 | --floor／--no-floor | 有効 | 床より下に沈んだ頂点を床の高さへ戻す |
 
 目安：1分×1fps×6方向で約360枚です。時間サンプル数は「秒数×fps」で、`--max-frames` を超える場合は `--max-frames`・`--fps`・`--duration` を調整してください。
@@ -125,14 +133,15 @@ bash run.sh /data/room360.mp4 /data/result --fps 3 --face-size 1024
 bash run.sh /data/room360.mp4 /data/result --fps 3 --face-size 1024 --resume
 ~~~
 
+- `--face-size` の既定が自動になる前に作ったジョブは、当時の値（例：`--face-size 1024`）を付けて再開してください。付けないと設定の違いとして停止します。
 - 元動画はSHA-256で照合します。動画や設定が違うと、違う項目を表示して停止します。
 - 次の設定だけは、変えて再開すると影響する工程から作り直します。深度推定（06）などの前の工程はそのまま使います。
 
   | 設定 | 作り直す工程 |
   |---|---|
-  | --target-faces、--free-space-support、--close-holes | 09（メッシュ）から |
+  | --target-faces、--free-space-support、--close-holes、--smooth | 09（メッシュ）から |
   | --floor／--no-floor | 09b（床の処理）から |
-  | --texture-size | 10（テクスチャ）から |
+  | --texture-size、--virtual-face-images | 10（テクスチャ）から |
 
 - 処理内容が変わった版に更新したときは、変わった工程から自動で作り直します（詳細は[CHANGELOG-ja.md](CHANGELOG-ja.md)）。
 - 出力を手で編集・移動・削除してからの再開は対象外です。
@@ -238,7 +247,7 @@ GPUの使用状況は `nvidia-smi dmon -s u` で確認できます（動画デ�
 **見積もりの式**
 
 - 画像数 ＝ 秒数 × fps × 6方向（`--faces 4` なら4方向）
-- ディスク ≒ 画像数 × 32MB（1,024px）、× 72MB（1,536px）。画像そのものやメッシュは数GB〜十数GBなので、深度・法線マップがほぼすべて
+- ディスク ≒ 画像数 × 32MB（1,024px）、× 35MB（1,072px）、× 72MB（1,536px）。画像そのものやメッシュは数GB〜十数GBなので、深度・法線マップがほぼすべて
 - 深度推定の時間は、おおむね画像数 × 画像の面積に比例します（T4×4・1,024pxで約13,000枚あたり17時間）
 
 **ディスクを減らす**
